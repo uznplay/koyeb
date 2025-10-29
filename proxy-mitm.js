@@ -21,8 +21,24 @@ const CONFIG = {
     'x-safeexambrowser-requesthash': 'c3faee4ad084dfd87a1a017e0c75544c5e4824ff1f3ca4cdce0667ee82a5091a'
   },
   ENABLE_LOGGING: true,
-  LOG_HEADERS: false
+  LOG_HEADERS: false,
+  // Whitelist: Only inject headers for these domains
+  ALLOWED_DOMAINS: [
+    'exam.fpt.edu.vn',
+    // Add more domains here if needed
+    // 'another-exam-site.com'
+  ]
 };
+
+// Check if domain should get header injection
+function shouldInjectHeaders(hostname) {
+  if (!hostname) return false;
+  
+  // Exact match or subdomain match
+  return CONFIG.ALLOWED_DOMAINS.some(domain => 
+    hostname === domain || hostname.endsWith('.' + domain)
+  );
+}
 
 // Paths
 const CERT_DIR = path.join(__dirname, 'certs');
@@ -119,9 +135,14 @@ function log(type, message, data = '') {
   console.log(`${color}[${timestamp}] [${type}]${colors.RESET} ${message}`, data);
 }
 
-// Inject headers
-function injectHeaders(headers) {
+// Inject headers (only for whitelisted domains)
+function injectHeaders(headers, hostname) {
   const injected = { ...headers };
+  
+  // Only inject headers for whitelisted domains
+  if (!shouldInjectHeaders(hostname)) {
+    return injected; // Return headers unchanged
+  }
   
   for (const [key, value] of Object.entries(CONFIG.HEADERS)) {
     injected[key] = value;
@@ -162,8 +183,8 @@ function handleHttpRequest(req, res) {
   
   // Handle relative URLs (browser directly accessing proxy)
   if (!req.url.startsWith('http://') && !req.url.startsWith('https://')) {
-    log('INFO', `Info page request: ${req.url}`);
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    log('WARN', `Invalid proxy request: ${req.url}`);
+    res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(`
 <!DOCTYPE html>
 <html>
@@ -181,9 +202,9 @@ function handleHttpRequest(req, res) {
 <body>
   <h1>🔒 SEB MITM Proxy Server</h1>
   
-  <div class="info">
-    <strong>✅ Proxy is Running</strong><br>
-    This is a forward proxy server for Safe Exam Browser.
+  <div class="error">
+    <strong>❌ Invalid Request</strong><br>
+    This is a forward proxy server, not a web server.
   </div>
   
   <div class="info">
@@ -213,7 +234,7 @@ function handleHttpRequest(req, res) {
   
   log('INFO', `→ HTTP ${req.method} ${req.url}`);
   
-  const headers = injectHeaders(req.headers);
+  const headers = injectHeaders(req.headers, parsedUrl.hostname);
   delete headers['proxy-connection'];
   
   const options = {
@@ -269,7 +290,7 @@ function handleHttpsConnect(req, clientSocket, head) {
     const targetUrl = `https://${hostname}${req.url}`;
     log('INFO', `→ HTTPS ${req.method} ${targetUrl}`);
     
-    const headers = injectHeaders(req.headers);
+    const headers = injectHeaders(req.headers, hostname);
     delete headers['proxy-connection'];
     
     const options = {
@@ -349,16 +370,9 @@ function startServer(port, attempt = 0) {
 }
 
 // Start server
-if (!loadCA()) {
-  console.error('');
-  console.error('\x1b[31m═══════════════════════════════════════════════════════════════\x1b[0m');
-  console.error('\x1b[31m  FATAL: Certificate not found!\x1b[0m');
-  console.error('\x1b[31m═══════════════════════════════════════════════════════════════\x1b[0m');
-  console.error('');
-  process.exit(1); // Exit with error code
+if (loadCA()) {
+  startServer(CONFIG.PORT);
 }
-
-startServer(CONFIG.PORT);
 
 function printBanner() {
   console.clear();
