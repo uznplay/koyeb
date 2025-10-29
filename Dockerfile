@@ -13,8 +13,8 @@ RUN npm install --production
 # Copy all source code
 COPY . .
 
-# Generate CA certificates (ignore errors if fails)
-RUN node setup-certificates.js || echo "Certificate will be generated at runtime"
+# Create certs directory (certificates will be generated at runtime)
+RUN mkdir -p /app/certs && chmod 755 /app/certs
 
 # Expose port
 EXPOSE 8080
