@@ -27,12 +27,28 @@
       'exam.fpt.edu.vn',
       // Add more domains here if needed
       // 'another-exam-site.com'
-    ]
+    ],
+    // Performance optimization
+    CERT_CACHE_MAX_SIZE: 50,        // Max 50 certs (enough for most use cases)
+    CERT_CACHE_TTL: 86400000,       // 24 hours (1 day) - long enough for exam sessions
+    LOG_ONLY_WHITELISTED: true,     // Only log whitelisted domains
+    DISABLE_TCP_TUNNEL_LOGS: true   // Don't log TCP tunnel connections
   };
 
   // Check if domain should get header injection
-  function shouldInjectHeaders(hostname) {
+  function shouldInjectHeaders(hostname, urlPath = '') {
     if (!hostname) return false;
+    
+    // Skip header injection for static files (CSS, JS, images, fonts, etc.)
+    const staticFileExtensions = [
+      '.css', '.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', 
+      '.ico', '.woff', '.woff2', '.ttf', '.eot', '.otf',
+      '.mp4', '.webm', '.mp3', '.wav', '.pdf', '.zip'
+    ];
+    
+    if (urlPath && staticFileExtensions.some(ext => urlPath.toLowerCase().endsWith(ext))) {
+      return false; // Don't inject headers for static files
+    }
     
     // Exact match or subdomain match
     return CONFIG.ALLOWED_DOMAINS.some(domain => 
@@ -45,8 +61,9 @@
   const CA_KEY_FILE = path.join(CERT_DIR, 'ca-key.pem');
   const CA_CERT_FILE = path.join(CERT_DIR, 'ca-cert.pem');
 
-  // Certificate cache
+  // Certificate cache with TTL and size limit
   const certCache = new Map();
+  const certCacheTimes = new Map();
   let caKey, caCert;
 
   // Statistics
@@ -77,20 +94,64 @@
     }
   }
 
-  // Generate certificate for domain
-  function generateCertificate(hostname) {
-    if (certCache.has(hostname)) {
-      return certCache.get(hostname);
+  // Clean expired certificates from cache
+  function cleanCertCache() {
+    const now = Date.now();
+    const toDelete = [];
+    
+    for (const [hostname, timestamp] of certCacheTimes.entries()) {
+      if (now - timestamp > CONFIG.CERT_CACHE_TTL) {
+        toDelete.push(hostname);
+      }
     }
     
+    toDelete.forEach(hostname => {
+      certCache.delete(hostname);
+      certCacheTimes.delete(hostname);
+    });
+    
+    // If cache is still too big, remove oldest entries
+    if (certCache.size > CONFIG.CERT_CACHE_MAX_SIZE) {
+      const entries = Array.from(certCacheTimes.entries())
+        .sort((a, b) => a[1] - b[1]);
+      
+      const toRemove = entries.slice(0, certCache.size - CONFIG.CERT_CACHE_MAX_SIZE);
+      toRemove.forEach(([hostname]) => {
+        certCache.delete(hostname);
+        certCacheTimes.delete(hostname);
+      });
+    }
+  }
+
+  // Load or generate persistent certificate for a domain
+  function loadOrGeneratePersistentCert(hostname) {
+    const certFile = path.join(CERT_DIR, `${hostname}.pem`);
+    const keyFile = path.join(CERT_DIR, `${hostname}-key.pem`);
+    
+    // Try to load existing cert from disk
+    if (fs.existsSync(certFile) && fs.existsSync(keyFile)) {
+      try {
+        const certificate = fs.readFileSync(certFile, 'utf8');
+        const privateKey = fs.readFileSync(keyFile, 'utf8');
+        
+        log('SUCCESS', `📁 Loaded persistent cert for ${hostname}`);
+        return { privateKey, certificate };
+      } catch (err) {
+        log('ERROR', `Failed to load cert for ${hostname}:`, err.message);
+      }
+    }
+    
+    // Generate new cert if not exists
     try {
-      const keys = forge.pki.rsa.generateKeyPair(2048);
+      log('INFO', `🔨 Generating persistent cert for ${hostname}...`);
+      
+      const keys = forge.pki.rsa.generateKeyPair({ bits: 2048, workers: -1 });
       const cert = forge.pki.createCertificate();
       cert.publicKey = keys.publicKey;
-      cert.serialNumber = Math.floor(Math.random() * 100000).toString();
+      cert.serialNumber = '01'; // Fixed serial number for consistency
       cert.validity.notBefore = new Date();
       cert.validity.notAfter = new Date();
-      cert.validity.notAfter.setFullYear(cert.validity.notBefore.getFullYear() + 1);
+      cert.validity.notAfter.setFullYear(cert.validity.notBefore.getFullYear() + 10); // Valid for 10 years!
       
       const attrs = [{ name: 'commonName', value: hostname }];
       cert.setSubject(attrs);
@@ -110,17 +171,51 @@
         certificate: forge.pki.certificateToPem(cert)
       };
       
-      certCache.set(hostname, pem);
+      // Save to disk for persistence
+      fs.writeFileSync(keyFile, pem.privateKey);
+      fs.writeFileSync(certFile, pem.certificate);
+      
+      log('SUCCESS', `💾 Saved persistent cert for ${hostname} (valid 10 years)`);
+      
       return pem;
     } catch (err) {
-      log('ERROR', `Failed to generate certificate for ${hostname}:`, err.message);
+      log('ERROR', `Failed to generate cert for ${hostname}:`, err.message);
       return null;
     }
   }
 
-  // Logging
-  function log(type, message, data = '') {
+  // Generate certificate for domain (with persistent storage)
+  function generateCertificate(hostname) {
+    // Check memory cache first (fastest)
+    if (certCache.has(hostname)) {
+      return certCache.get(hostname);
+    }
+    
+    // Load or generate persistent cert
+    const pem = loadOrGeneratePersistentCert(hostname);
+    
+    if (pem) {
+      // Add to memory cache (no TTL needed - cert is persistent)
+      certCache.set(hostname, pem);
+      certCacheTimes.set(hostname, Date.now());
+    }
+    
+    return pem;
+  }
+
+  // Optimized logging (reduced I/O)
+  function log(type, message, data = '', hostname = '') {
     if (!CONFIG.ENABLE_LOGGING) return;
+    
+    // Skip logging for TCP tunnels if configured
+    if (CONFIG.DISABLE_TCP_TUNNEL_LOGS && message.includes('TCP TUNNEL')) {
+      return;
+    }
+    
+    // Only log whitelisted domains if configured
+    if (CONFIG.LOG_ONLY_WHITELISTED && hostname && !shouldInjectHeaders(hostname)) {
+      return;
+    }
     
     const timestamp = new Date().toISOString();
     const colors = {
@@ -136,11 +231,11 @@
   }
 
   // Inject headers (only for whitelisted domains)
-  function injectHeaders(headers, hostname) {
+  function injectHeaders(headers, hostname, urlPath = '') {
     const injected = { ...headers };
     
-    // Only inject headers for whitelisted domains
-    if (!shouldInjectHeaders(hostname)) {
+    // Only inject headers for whitelisted domains and non-static files
+    if (!shouldInjectHeaders(hostname, urlPath)) {
       return injected; // Return headers unchanged
     }
     
@@ -164,7 +259,7 @@
         const cert = fs.readFileSync(CA_CERT_FILE);
         res.writeHead(200, {
           'Content-Type': 'application/x-pem-file',
-          'Content-Disposition': 'attachment; filename="railway-seb-ca.pem"'
+          'Content-Disposition': 'attachment; filename="cert.pem"'
         });
         res.end(cert);
         log('INFO', '📥 Certificate downloaded via /cert');
@@ -280,25 +375,12 @@
   </head>
   <body>
     <div class="container">
-      <h1>🔒 SEB MITM Proxy Server</h1>
+      <h1>🔒 SEB Server</h1>
       <div class="subtitle">For Safe Exam Browser only</div>
-      
-      <div class="error">
-        <div class="error-title">❌ Invalid Request</div>
-        <div class="error-text">This is a forward proxy server, not a web server.</div>
-      </div>
       
       <div class="download">
         <div class="download-title">📥 Download Certificate:</div>
         <a href="/cert" class="download-link">Click here to download CA certificate</a>
-      </div>
-      
-      <div class="stats">
-        <div class="stats-title">📊 Stats:</div>
-        <div class="stats-content">
-          Total Requests: ${stats.totalRequests}<br>
-          HTTP: ${stats.httpRequests} | HTTPS: ${stats.httpsRequests}
-        </div>
       </div>
     </div>
   </body>
@@ -309,9 +391,9 @@
     
     const parsedUrl = new URL(req.url);
     
-    log('INFO', `→ HTTP ${req.method} ${req.url}`);
+    log('INFO', `→ HTTP ${req.method} ${req.url}`, '', parsedUrl.hostname);
     
-    const headers = injectHeaders(req.headers, parsedUrl.hostname);
+    const headers = injectHeaders(req.headers, parsedUrl.hostname, parsedUrl.pathname);
     delete headers['proxy-connection'];
     
     const options = {
@@ -346,10 +428,10 @@
     const { hostname, port } = url.parse(`http://${req.url}`);
     const targetPort = parseInt(port) || 443;
     
-    log('INFO', `→ HTTPS CONNECT ${hostname}:${targetPort}`);
+    log('INFO', `→ HTTPS CONNECT ${hostname}:${targetPort}`, '', hostname);
     
-    // ===== OPTIMIZATION: Only MITM for whitelisted domains =====
-    if (!shouldInjectHeaders(hostname)) {
+    // ===== OPTIMIZATION: Only MITM for whitelisted domains (excluding static files) =====
+    if (!shouldInjectHeaders(hostname, '')) {
       // For non-whitelisted domains: Use simple TCP tunnel (NO MITM)
       // This saves 80% CPU/RAM by not decrypting/re-encrypting
       const serverSocket = net.connect(targetPort, hostname, () => {
@@ -392,9 +474,9 @@
       stats.totalRequests++;
       
       const targetUrl = `https://${hostname}${req.url}`;
-      log('INFO', `→ HTTPS ${req.method} ${targetUrl}`);
+      log('INFO', `→ HTTPS ${req.method} ${targetUrl}`, '', hostname);
       
-      const headers = injectHeaders(req.headers, hostname);
+      const headers = injectHeaders(req.headers, hostname, req.url);
       delete headers['proxy-connection'];
       
       const options = {
