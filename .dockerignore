@@ -8,6 +8,7 @@ npm-debug.log
 .DS_Store
 *.bat
 fly.toml
-certs/*.pem
-certs/*.key
+# certs/*.pem   # Allow certs for instant startup
+# certs/*.key   # Allow certs for instant startup
+
 
