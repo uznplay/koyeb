@@ -349,9 +349,16 @@ function startServer(port, attempt = 0) {
 }
 
 // Start server
-if (loadCA()) {
-  startServer(CONFIG.PORT);
+if (!loadCA()) {
+  console.error('');
+  console.error('\x1b[31m═══════════════════════════════════════════════════════════════\x1b[0m');
+  console.error('\x1b[31m  FATAL: Certificate not found!\x1b[0m');
+  console.error('\x1b[31m═══════════════════════════════════════════════════════════════\x1b[0m');
+  console.error('');
+  process.exit(1); // Exit with error code
 }
+
+startServer(CONFIG.PORT);
 
 function printBanner() {
   console.clear();
