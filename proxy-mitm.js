@@ -14,16 +14,20 @@
   const pino = require('pino');
 
   // ===== OPTIMIZATION 1: Pino Async Logger =====
+  const isProd = process.env.NODE_ENV === 'production';
   const logger = pino({
-    level: process.env.LOG_LEVEL || 'info',
-    transport: {
-      target: 'pino-pretty',
-      options: {
-        colorize: true,
-        translateTime: 'SYS:yyyy-mm-dd HH:MM:ss.l',
-        ignore: 'pid,hostname'
+    level: process.env.LOG_LEVEL || (isProd ? 'warn' : 'info'),
+    // In production: use fast JSON output (no pretty printing)
+    ...(isProd ? {} : {
+      transport: {
+        target: 'pino-pretty',
+        options: {
+          colorize: true,
+          translateTime: 'SYS:yyyy-mm-dd HH:MM:ss.l',
+          ignore: 'pid,hostname'
+        }
       }
-    }
+    })
   });
 
   // ===== OPTIMIZATION 2: Keep-Alive Agents for Connection Reuse =====
@@ -69,6 +73,7 @@
     if (!hostname) return false;
     
     // Skip header injection for static files (CSS, JS, images, fonts, etc.)
+    // These don't need headers and can use simple TCP tunnel (saves 80% CPU!)
     const staticFileExtensions = [
       '.css', '.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', 
       '.ico', '.woff', '.woff2', '.ttf', '.eot', '.otf',
@@ -293,7 +298,7 @@
         const cert = fs.readFileSync(CA_CERT_FILE);
         res.writeHead(200, {
           'Content-Type': 'application/x-pem-file',
-          'Content-Disposition': 'attachment; filename="cert.pem"'
+          'Content-Disposition': 'attachment; filename="railway-seb-ca.pem"'
         });
         res.end(cert);
         log('INFO', '📥 Certificate downloaded via /cert');
@@ -409,12 +414,25 @@
   </head>
   <body>
     <div class="container">
-      <h1>🔒 SEB Server</h1>
+      <h1>🔒 SEB MITM Proxy Server</h1>
       <div class="subtitle">For Safe Exam Browser only</div>
+      
+      <div class="error">
+        <div class="error-title">❌ Invalid Request</div>
+        <div class="error-text">This is a forward proxy server, not a web server.</div>
+      </div>
       
       <div class="download">
         <div class="download-title">📥 Download Certificate:</div>
         <a href="/cert" class="download-link">Click here to download CA certificate</a>
+      </div>
+      
+      <div class="stats">
+        <div class="stats-title">📊 Stats:</div>
+        <div class="stats-content">
+          Total Requests: ${stats.totalRequests}<br>
+          HTTP: ${stats.httpRequests} | HTTPS: ${stats.httpsRequests}
+        </div>
       </div>
     </div>
   </body>
@@ -465,8 +483,8 @@
     
     log('INFO', `→ HTTPS CONNECT ${hostname}:${targetPort}`, '', hostname);
     
-    // ===== OPTIMIZATION: Only MITM for whitelisted domains (excluding static files) =====
-    if (!shouldInjectHeaders(hostname, '')) {
+    // ===== OPTIMIZATION: Only MITM for whitelisted domains =====
+    if (!shouldInjectHeaders(hostname)) {
       // For non-whitelisted domains: Use simple TCP tunnel (NO MITM)
       // This saves 80% CPU/RAM by not decrypting/re-encrypting
       const serverSocket = net.connect(targetPort, hostname, () => {
