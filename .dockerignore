@@ -9,6 +9,7 @@ npm-debug.log
 *.bat
 fly.toml
 # certs/*.pem   # Allow certs for instant startup
-# certs/*.key   # Allow certs for instant startup
+# certs/*.key   # Allow certs for instant startu
+
 
 
