@@ -11,6 +11,35 @@
   const forge = require('node-forge');
   const fs = require('fs');
   const path = require('path');
+  const pino = require('pino');
+
+  // ===== OPTIMIZATION 1: Pino Async Logger =====
+  const logger = pino({
+    level: process.env.LOG_LEVEL || 'info',
+    transport: {
+      target: 'pino-pretty',
+      options: {
+        colorize: true,
+        translateTime: 'SYS:yyyy-mm-dd HH:MM:ss.l',
+        ignore: 'pid,hostname'
+      }
+    }
+  });
+
+  // ===== OPTIMIZATION 2: Keep-Alive Agents for Connection Reuse =====
+  const httpAgent = new http.Agent({
+    keepAlive: true,
+    maxSockets: 100,
+    keepAliveMsecs: 10000,
+    maxFreeSockets: 10
+  });
+
+  const httpsAgent = new https.Agent({
+    keepAlive: true,
+    maxSockets: 100,
+    keepAliveMsecs: 10000,
+    maxFreeSockets: 10
+  });
 
   // Configuration
   const CONFIG = {
@@ -203,7 +232,7 @@
     return pem;
   }
 
-  // Optimized logging (reduced I/O)
+  // Optimized async logging with Pino
   function log(type, message, data = '', hostname = '') {
     if (!CONFIG.ENABLE_LOGGING) return;
     
@@ -217,17 +246,22 @@
       return;
     }
     
-    const timestamp = new Date().toISOString();
-    const colors = {
-      INFO: '\x1b[36m',
-      SUCCESS: '\x1b[32m',
-      ERROR: '\x1b[31m',
-      WARNING: '\x1b[33m',
-      RESET: '\x1b[0m'
+    // Map type to pino log levels
+    const levelMap = {
+      'INFO': 'info',
+      'SUCCESS': 'info',
+      'ERROR': 'error',
+      'WARNING': 'warn'
     };
     
-    const color = colors[type] || colors.INFO;
-    console.log(`${color}[${timestamp}] [${type}]${colors.RESET} ${message}`, data);
+    const level = levelMap[type] || 'info';
+    const logData = {
+      msg: message,
+      ...(hostname && { hostname }),
+      ...(data && { data })
+    };
+    
+    logger[level](logData);
   }
 
   // Inject headers (only for whitelisted domains)
@@ -401,7 +435,8 @@
       port: parsedUrl.port || 80,
       path: parsedUrl.pathname + parsedUrl.search,
       method: req.method,
-      headers: headers
+      headers: headers,
+      agent: httpAgent  // Keep-Alive agent for connection reuse
     };
     
     const proxyReq = http.request(options, (proxyRes) => {
@@ -484,7 +519,8 @@
         port: targetPort,
         path: req.url,
         method: req.method,
-        headers: headers
+        headers: headers,
+        agent: httpsAgent  // Keep-Alive agent for connection reuse
       };
       
       const proxyReq = https.request(options, (proxyRes) => {
@@ -609,6 +645,10 @@
     console.log(`    Headers Injected:  ${stats.headersInjected}`);
     console.log(`    Errors:            ${stats.errors}`);
     console.log('');
+    
+    // Cleanup Keep-Alive agents
+    httpAgent.destroy();
+    httpsAgent.destroy();
     
     proxyServer.close(() => {
       log('SUCCESS', 'Server closed');
