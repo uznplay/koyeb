@@ -1,0 +1,13 @@
+node_modules
+npm-debug.log
+.git
+.gitignore
+*.md
+!README.md
+.env
+.DS_Store
+*.bat
+fly.toml
+certs/*.pem
+certs/*.key
+
