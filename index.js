@@ -24,20 +24,32 @@ function generateCertificate() {
     });
     
     setup.on('close', (code) => {
-      if (code === 0 || fs.existsSync(certPath)) {
-        console.log('✅ Certificate ready');
-        resolve();
+      if (code === 0) {
+        // Wait a bit for file to be flushed to disk
+        setTimeout(() => {
+          if (fs.existsSync(certPath)) {
+            const keyPath = path.join(__dirname, 'certs', 'ca-key.pem');
+            if (fs.existsSync(keyPath)) {
+              console.log('✅ Certificate ready and verified');
+              resolve(true);
+            } else {
+              console.error('❌ Certificate key not found!');
+              reject(new Error('Certificate key not found'));
+            }
+          } else {
+            console.error('❌ Certificate not found after generation!');
+            reject(new Error('Certificate not found'));
+          }
+        }, 1000); // Wait 1 second for file flush
       } else {
-        console.warn('⚠️ Certificate generation failed, will retry at runtime');
-        // Don't fail, just continue
-        resolve();
+        console.error('❌ Certificate generation failed with code:', code);
+        reject(new Error(`Certificate generation failed with code ${code}`));
       }
     });
     
     setup.on('error', (err) => {
-      console.warn('⚠️ Certificate generation error:', err.message);
-      // Don't fail, just continue
-      resolve();
+      console.error('❌ Certificate generation error:', err.message);
+      reject(err);
     });
   });
 }
@@ -79,15 +91,30 @@ function startProxy() {
 
 async function main() {
   try {
-    if (!fs.existsSync(certPath)) {
+    // Always check both cert and key
+    const keyPath = path.join(__dirname, 'certs', 'ca-key.pem');
+    const certExists = fs.existsSync(certPath);
+    const keyExists = fs.existsSync(keyPath);
+    
+    if (!certExists || !keyExists) {
+      console.log('🔑 Generating certificates...');
       await generateCertificate();
     } else {
-      console.log('✅ Certificate already exists');
+      console.log('✅ Certificates already exist');
+    }
+    
+    // Double-check before starting proxy
+    if (!fs.existsSync(certPath) || !fs.existsSync(keyPath)) {
+      throw new Error('Certificates not found after generation!');
     }
     
     startProxy();
   } catch (err) {
-    console.error('❌ Fatal error:', err);
+    console.error('');
+    console.error('═══════════════════════════════════════════════════════════════');
+    console.error('❌ FATAL ERROR:', err.message);
+    console.error('═══════════════════════════════════════════════════════════════');
+    console.error('');
     process.exit(1);
   }
 }
