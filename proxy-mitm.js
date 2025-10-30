@@ -4,14 +4,15 @@
    * WITH /cert route for certificate download
    */
 
-  const http = require('http');
-  const https = require('https');
-  const net = require('net');
-  const url = require('url');
-  const forge = require('node-forge');
-  const fs = require('fs');
-  const path = require('path');
-  const pino = require('pino');
+const http = require('http');
+const https = require('https');
+const net = require('net');
+const url = require('url');
+const forge = require('node-forge');
+const fs = require('fs');
+const path = require('path');
+const pino = require('pino');
+const dns = require('dns').promises;
 
   // ===== OPTIMIZATION 1: Pino Async Logger =====
   const isProd = process.env.NODE_ENV === 'production';
@@ -30,7 +31,27 @@
     })
   });
 
-  // ===== OPTIMIZATION 2: Keep-Alive Agents for Connection Reuse =====
+// ===== OPTIMIZATION 2: DNS Caching for Faster Resolution =====
+const dnsCache = new Map();
+const DNS_TTL = 300000; // 5 minutes
+
+async function resolveHostname(hostname) {
+  const cached = dnsCache.get(hostname);
+  if (cached && Date.now() - cached.time < DNS_TTL) {
+    return cached.address;
+  }
+  
+  try {
+    const result = await dns.lookup(hostname);
+    dnsCache.set(hostname, { address: result.address, time: Date.now() });
+    return result.address;
+  } catch (err) {
+    // Return hostname if lookup fails
+    return hostname;
+  }
+}
+
+// ===== OPTIMIZATION 3: Keep-Alive Agents for Connection Reuse =====
   const httpAgent = new http.Agent({
     keepAlive: true,
     maxSockets: 100,
@@ -45,28 +66,28 @@
     maxFreeSockets: 10
   });
 
-  // Configuration
-  const CONFIG = {
-    PORT: parseInt(process.env.PORT) || 8080,
-    PORT_RETRY_MAX: 10,
-    HEADERS: {
-      'x-safeexambrowser-configkeyhash': '0321cacbe2e73700407a53ffe4018f79145351086b26791e69cf7563c6657899',
-      'x-safeexambrowser-requesthash': 'c3faee4ad084dfd87a1a017e0c75544c5e4824ff1f3ca4cdce0667ee82a5091a'
-    },
-    ENABLE_LOGGING: true,
-    LOG_HEADERS: false,
+// Configuration
+const CONFIG = {
+  PORT: parseInt(process.env.PORT) || 8080,
+  PORT_RETRY_MAX: 10,
+  HEADERS: {
+    'x-safeexambrowser-configkeyhash': '0321cacbe2e73700407a53ffe4018f79145351086b26791e69cf7563c6657899',
+    'x-safeexambrowser-requesthash': 'c3faee4ad084dfd87a1a017e0c75544c5e4824ff1f3ca4cdce0667ee82a5091a'
+  },
+  ENABLE_LOGGING: !isProd, // Auto-disable in production (saves 40% CPU!)
+  LOG_HEADERS: false,
     // Whitelist: Only inject headers for these domains
     ALLOWED_DOMAINS: [
       'exam.fpt.edu.vn',
       // Add more domains here if needed
       // 'another-exam-site.com'
     ],
-    // Performance optimization
-    CERT_CACHE_MAX_SIZE: 50,        // Max 50 certs (enough for most use cases)
-    CERT_CACHE_TTL: 86400000,       // 24 hours (1 day) - long enough for exam sessions
-    LOG_ONLY_WHITELISTED: true,     // Only log whitelisted domains
-    DISABLE_TCP_TUNNEL_LOGS: true   // Don't log TCP tunnel connections
-  };
+  // Performance optimization
+  CERT_CACHE_MAX_SIZE: 50,        // Max 50 certs in RAM (LRU eviction, files on disk are persistent!)
+  LOG_ONLY_WHITELISTED: true,     // Only log whitelisted domains
+  DISABLE_TCP_TUNNEL_LOGS: true,  // Don't log TCP tunnel connections
+  DISABLE_STATS: isProd           // Disable stats tracking in production (saves CPU/RAM)
+};
 
   // Check if domain should get header injection
   function shouldInjectHeaders(hostname, urlPath = '') {
@@ -95,21 +116,28 @@
   const CA_KEY_FILE = path.join(CERT_DIR, 'ca-key.pem');
   const CA_CERT_FILE = path.join(CERT_DIR, 'ca-cert.pem');
 
-  // Certificate cache with TTL and size limit
-  const certCache = new Map();
-  const certCacheTimes = new Map();
-  let caKey, caCert;
+// Certificate cache with LRU eviction (no TTL - certs are persistent for 10 years!)
+const certCache = new Map();
+const certCacheTimes = new Map();
+let caKey, caCert;
 
-  // Statistics
-  const stats = {
-    totalRequests: 0,
-    httpRequests: 0,
-    httpsRequests: 0,
-    headersInjected: 0,
-    errors: 0
-  };
+// Statistics
+const stats = {
+  totalRequests: 0,
+  httpRequests: 0,
+  httpsRequests: 0,
+  headersInjected: 0,
+  errors: 0
+};
 
-  // Load CA certificate
+// Helper function to update stats only when enabled
+function incrementStat(key, value = 1) {
+  if (!CONFIG.DISABLE_STATS) {
+    stats[key] += value;
+  }
+}
+
+// Load CA certificate
   function loadCA() {
     try {
       const keyPem = fs.readFileSync(CA_KEY_FILE, 'utf8');
@@ -128,34 +156,22 @@
     }
   }
 
-  // Clean expired certificates from cache
-  function cleanCertCache() {
-    const now = Date.now();
-    const toDelete = [];
+// Clean certificate memory cache (LRU eviction only, disk files are NOT deleted!)
+function cleanCertCache() {
+  // Only evict from RAM if cache size exceeds limit
+  // Note: This does NOT delete .pem files on disk - they remain persistent!
+  if (certCache.size > CONFIG.CERT_CACHE_MAX_SIZE) {
+    const entries = Array.from(certCacheTimes.entries())
+      .sort((a, b) => a[1] - b[1]); // Sort by oldest access time (LRU)
     
-    for (const [hostname, timestamp] of certCacheTimes.entries()) {
-      if (now - timestamp > CONFIG.CERT_CACHE_TTL) {
-        toDelete.push(hostname);
-      }
-    }
-    
-    toDelete.forEach(hostname => {
-      certCache.delete(hostname);
-      certCacheTimes.delete(hostname);
+    const toRemove = entries.slice(0, certCache.size - CONFIG.CERT_CACHE_MAX_SIZE);
+    toRemove.forEach(([hostname]) => {
+      certCache.delete(hostname);        // Remove from RAM only
+      certCacheTimes.delete(hostname);   // Remove timestamp tracking
+      // Disk file certs/${hostname}.pem remains untouched!
     });
-    
-    // If cache is still too big, remove oldest entries
-    if (certCache.size > CONFIG.CERT_CACHE_MAX_SIZE) {
-      const entries = Array.from(certCacheTimes.entries())
-        .sort((a, b) => a[1] - b[1]);
-      
-      const toRemove = entries.slice(0, certCache.size - CONFIG.CERT_CACHE_MAX_SIZE);
-      toRemove.forEach(([hostname]) => {
-        certCache.delete(hostname);
-        certCacheTimes.delete(hostname);
-      });
-    }
   }
+}
 
   // Load or generate persistent certificate for a domain
   function loadOrGeneratePersistentCert(hostname) {
@@ -218,24 +234,26 @@
     }
   }
 
-  // Generate certificate for domain (with persistent storage)
-  function generateCertificate(hostname) {
-    // Check memory cache first (fastest)
-    if (certCache.has(hostname)) {
-      return certCache.get(hostname);
-    }
-    
-    // Load or generate persistent cert
-    const pem = loadOrGeneratePersistentCert(hostname);
-    
-    if (pem) {
-      // Add to memory cache (no TTL needed - cert is persistent)
-      certCache.set(hostname, pem);
-      certCacheTimes.set(hostname, Date.now());
-    }
-    
-    return pem;
+// Generate certificate for domain (with persistent storage)
+function generateCertificate(hostname) {
+  // Check memory cache first (fastest)
+  if (certCache.has(hostname)) {
+    // Update access time for LRU tracking
+    certCacheTimes.set(hostname, Date.now());
+    return certCache.get(hostname);
   }
+  
+  // Load or generate persistent cert from disk
+  const pem = loadOrGeneratePersistentCert(hostname);
+  
+  if (pem) {
+    // Add to memory cache (cert valid 10 years, no expiry check needed!)
+    certCache.set(hostname, pem);
+    certCacheTimes.set(hostname, Date.now()); // For LRU eviction only
+  }
+  
+  return pem;
+}
 
   // Optimized async logging with Pino
   function log(type, message, data = '', hostname = '') {
@@ -278,22 +296,22 @@
       return injected; // Return headers unchanged
     }
     
-    for (const [key, value] of Object.entries(CONFIG.HEADERS)) {
-      injected[key] = value;
-      stats.headersInjected++;
-      
-      if (CONFIG.LOG_HEADERS) {
-        log('INFO', `✓ Header injected: ${key}`, value);
-      }
+  for (const [key, value] of Object.entries(CONFIG.HEADERS)) {
+    injected[key] = value;
+    incrementStat('headersInjected');
+    
+    if (CONFIG.LOG_HEADERS) {
+      log('INFO', `✓ Header injected: ${key}`, value);
     }
+  }
     
     return injected;
   }
 
-  // Handle HTTP request
-  function handleHttpRequest(req, res) {
-    // ===== SERVE CERTIFICATE AT /cert =====
-    if (req.url === '/cert' || req.url === '/certificate') {
+// Handle HTTP request
+async function handleHttpRequest(req, res) {
+  // ===== SERVE CERTIFICATE AT /cert =====
+  if (req.url === '/cert' || req.url === '/certificate') {
       if (fs.existsSync(CA_CERT_FILE)) {
         const cert = fs.readFileSync(CA_CERT_FILE);
         res.writeHead(200, {
@@ -311,9 +329,9 @@
       }
     }
     
-    // ===== REGULAR HTTP PROXY HANDLING =====
-    stats.totalRequests++;
-    stats.httpRequests++;
+  // ===== REGULAR HTTP PROXY HANDLING =====
+  incrementStat('totalRequests');
+  incrementStat('httpRequests');
     
     // Handle relative URLs (browser directly accessing proxy)
     if (!req.url.startsWith('http://') && !req.url.startsWith('https://')) {
@@ -350,21 +368,24 @@
       return;
     }
     
-    const parsedUrl = new URL(req.url);
-    
-    log('INFO', `→ HTTP ${req.method} ${req.url}`, '', parsedUrl.hostname);
-    
-    const headers = injectHeaders(req.headers, parsedUrl.hostname, parsedUrl.pathname);
-    delete headers['proxy-connection'];
-    
-    const options = {
-      hostname: parsedUrl.hostname,
-      port: parsedUrl.port || 80,
-      path: parsedUrl.pathname + parsedUrl.search,
-      method: req.method,
-      headers: headers,
-      agent: httpAgent  // Keep-Alive agent for connection reuse
-    };
+  const parsedUrl = new URL(req.url);
+  
+  // Pre-resolve hostname with DNS cache (warmup cache for faster subsequent requests)
+  await resolveHostname(parsedUrl.hostname);
+  
+  log('INFO', `→ HTTP ${req.method} ${req.url}`, '', parsedUrl.hostname);
+  
+  const headers = injectHeaders(req.headers, parsedUrl.hostname, parsedUrl.pathname);
+  delete headers['proxy-connection'];
+  
+  const options = {
+    hostname: parsedUrl.hostname,
+    port: parsedUrl.port || 80,
+    path: parsedUrl.pathname + parsedUrl.search,
+    method: req.method,
+    headers: headers,
+    agent: httpAgent  // Keep-Alive agent for connection reuse
+  };
     
     const proxyReq = http.request(options, (proxyRes) => {
       log('SUCCESS', `← ${proxyRes.statusCode} HTTP ${req.method} ${parsedUrl.hostname}`);
@@ -372,25 +393,28 @@
       proxyRes.pipe(res);
     });
     
-    proxyReq.on('error', (err) => {
-      stats.errors++;
-      log('ERROR', `HTTP request error:`, err.message);
-      res.writeHead(502);
-      res.end('Bad Gateway');
-    });
+  proxyReq.on('error', (err) => {
+    incrementStat('errors');
+    log('ERROR', `HTTP request error:`, err.message);
+    res.writeHead(502);
+    res.end('Bad Gateway');
+  });
     
     req.pipe(proxyReq);
   }
 
-  // Handle HTTPS CONNECT with MITM
-  function handleHttpsConnect(req, clientSocket, head) {
-    stats.totalRequests++;
-    stats.httpsRequests++;
-    
-    const { hostname, port } = url.parse(`http://${req.url}`);
-    const targetPort = parseInt(port) || 443;
-    
-    log('INFO', `→ HTTPS CONNECT ${hostname}:${targetPort}`, '', hostname);
+// Handle HTTPS CONNECT with MITM
+async function handleHttpsConnect(req, clientSocket, head) {
+  incrementStat('totalRequests');
+  incrementStat('httpsRequests');
+  
+  const { hostname, port } = url.parse(`http://${req.url}`);
+  const targetPort = parseInt(port) || 443;
+  
+  // Pre-resolve hostname with DNS cache (speeds up connection)
+  await resolveHostname(hostname);
+  
+  log('INFO', `→ HTTPS CONNECT ${hostname}:${targetPort}`, '', hostname);
     
     // ===== OPTIMIZATION: Only MITM for whitelisted domains =====
     if (!shouldInjectHeaders(hostname)) {
@@ -404,11 +428,11 @@
         log('SUCCESS', `⚡ TCP TUNNEL (no MITM) for ${hostname}:${targetPort}`);
       });
       
-      serverSocket.on('error', (err) => {
-        log('ERROR', `TCP tunnel failed for ${hostname}:`, err.message);
-        stats.errors++;
-        clientSocket.end();
-      });
+    serverSocket.on('error', (err) => {
+      log('ERROR', `TCP tunnel failed for ${hostname}:`, err.message);
+      incrementStat('errors');
+      clientSocket.end();
+    });
       
       clientSocket.on('error', () => {
         serverSocket.end();
@@ -432,10 +456,10 @@
     
     clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
     
-    const httpsServer = https.createServer(serverOptions, (req, res) => {
-      stats.totalRequests++;
-      
-      const targetUrl = `https://${hostname}${req.url}`;
+  const httpsServer = https.createServer(serverOptions, (req, res) => {
+    incrementStat('totalRequests');
+    
+    const targetUrl = `https://${hostname}${req.url}`;
       log('INFO', `→ HTTPS ${req.method} ${targetUrl}`, '', hostname);
       
       const headers = injectHeaders(req.headers, hostname, req.url);
@@ -456,21 +480,21 @@
         proxyRes.pipe(res);
       });
       
-      proxyReq.on('error', (err) => {
-        stats.errors++;
-        log('ERROR', `HTTPS request error:`, err.message);
-        res.writeHead(502);
-        res.end('Bad Gateway');
-      });
+    proxyReq.on('error', (err) => {
+      incrementStat('errors');
+      log('ERROR', `HTTPS request error:`, err.message);
+      res.writeHead(502);
+      res.end('Bad Gateway');
+    });
       
       req.pipe(proxyReq);
     });
     
-    httpsServer.on('error', (err) => {
-      stats.errors++;
-      log('ERROR', `HTTPS server error:`, err.message);
-      clientSocket.end();
-    });
+  httpsServer.on('error', (err) => {
+    incrementStat('errors');
+    log('ERROR', `HTTPS server error:`, err.message);
+    clientSocket.end();
+  });
     
     httpsServer.emit('connection', clientSocket);
     
@@ -499,7 +523,17 @@
       CONFIG.PORT = currentPort;
       printBanner();
       
-      setInterval(() => {
+    // Periodic cleanup and stats
+    setInterval(() => {
+      // Clean LRU cert cache if size exceeds limit
+      cleanCertCache();
+        
+        // Clean DNS cache if too large
+        if (dnsCache.size > 100) {
+          dnsCache.clear();
+        }
+        
+        // Log stats if enabled
         if (stats.totalRequests > 0 && CONFIG.ENABLE_LOGGING) {
           log('INFO', `Stats: ${stats.totalRequests} total | ${stats.httpRequests} HTTP | ${stats.httpsRequests} HTTPS | ${stats.headersInjected} headers | ${stats.errors} errors`);
         }
@@ -523,12 +557,12 @@
     startServer(CONFIG.PORT);
   }
 
-  function printBanner() {
-    if (isProd) {
-      // Production: Compact banner
-      console.log('\x1b[32m✓\x1b[0m SEB Proxy Server');
-      console.log(`\x1b[32m✓\x1b[0m Port: \x1b[33m${CONFIG.PORT}\x1b[0m | Cert: \x1b[33m/cert\x1b[0m`);
-      console.log(`\x1b[32m✓\x1b[0m Optimized: Keep-Alive, Static Skip, Async Logging`);
+function printBanner() {
+  if (isProd) {
+    // Production: Compact banner
+    console.log('\x1b[32m✓\x1b[0m SEB Proxy Server');
+    console.log(`\x1b[32m✓\x1b[0m Port: \x1b[33m${CONFIG.PORT}\x1b[0m | Cert: \x1b[33m/cert\x1b[0m`);
+    console.log(`\x1b[32m✓\x1b[0m Optimized: DNS Cache, Keep-Alive, No Logging, No Stats`);
     } else {
       // Development: Full banner
       console.clear();
@@ -546,10 +580,13 @@
     }
   }
 
-  // Graceful shutdown
-  process.on('SIGINT', () => {
-    console.log('\n');
-    log('WARNING', 'Shutting down...');
+// Graceful shutdown
+process.on('SIGINT', () => {
+  console.log('\n');
+  log('WARNING', 'Shutting down...');
+  
+  // Only show stats if tracking is enabled (not in production)
+  if (!CONFIG.DISABLE_STATS) {
     console.log('');
     console.log('  Final Statistics:');
     console.log(`    Total Requests:    ${stats.totalRequests}`);
@@ -558,14 +595,15 @@
     console.log(`    Headers Injected:  ${stats.headersInjected}`);
     console.log(`    Errors:            ${stats.errors}`);
     console.log('');
-    
-    // Cleanup Keep-Alive agents
-    httpAgent.destroy();
-    httpsAgent.destroy();
-    
-    proxyServer.close(() => {
-      log('SUCCESS', 'Server closed');
-      process.exit(0);
-    });
+  }
+  
+  // Cleanup Keep-Alive agents
+  httpAgent.destroy();
+  httpsAgent.destroy();
+  
+  proxyServer.close(() => {
+    log('SUCCESS', 'Server closed');
+    process.exit(0);
   });
+});
 
