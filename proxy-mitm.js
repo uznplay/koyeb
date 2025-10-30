@@ -100,15 +100,14 @@
   const certCacheTimes = new Map();
   let caKey, caCert;
 
-// Statistics
-const stats = {
-  totalRequests: 0,
-  httpRequests: 0,
-  httpsRequests: 0,
-  headersInjected: 0,
-  getRequestsBypassed: 0,  // GET requests không inject headers
-  errors: 0
-};
+  // Statistics
+  const stats = {
+    totalRequests: 0,
+    httpRequests: 0,
+    httpsRequests: 0,
+    headersInjected: 0,
+    errors: 0
+  };
 
   // Load CA certificate
   function loadCA() {
@@ -270,32 +269,26 @@ const stats = {
     logger[level](logData);
   }
 
-// Inject headers (only for whitelisted domains and non-GET requests)
-function injectHeaders(headers, hostname, urlPath = '', method = 'GET') {
-  const injected = { ...headers };
-  
-  // ===== OPTIMIZATION: Skip GET requests only - kệ nó luôn! =====
-  if (method === 'GET') {
-    stats.getRequestsBypassed++;
-    return injected; // GET không cần headers, cho đi thẳng
-  }
-  
-  // Only inject headers for whitelisted domains and non-static files
-  if (!shouldInjectHeaders(hostname, urlPath)) {
-    return injected; // Return headers unchanged
-  }
-  
-  for (const [key, value] of Object.entries(CONFIG.HEADERS)) {
-    injected[key] = value;
-    stats.headersInjected++;
+  // Inject headers (only for whitelisted domains)
+  function injectHeaders(headers, hostname, urlPath = '') {
+    const injected = { ...headers };
     
-    if (CONFIG.LOG_HEADERS) {
-      log('INFO', `✓ Header injected: ${key}`, value);
+    // Only inject headers for whitelisted domains and non-static files
+    if (!shouldInjectHeaders(hostname, urlPath)) {
+      return injected; // Return headers unchanged
     }
+    
+    for (const [key, value] of Object.entries(CONFIG.HEADERS)) {
+      injected[key] = value;
+      stats.headersInjected++;
+      
+      if (CONFIG.LOG_HEADERS) {
+        log('INFO', `✓ Header injected: ${key}`, value);
+      }
+    }
+    
+    return injected;
   }
-  
-  return injected;
-}
 
   // Handle HTTP request
   function handleHttpRequest(req, res) {
@@ -361,7 +354,7 @@ function injectHeaders(headers, hostname, urlPath = '', method = 'GET') {
     
     log('INFO', `→ HTTP ${req.method} ${req.url}`, '', parsedUrl.hostname);
     
-    const headers = injectHeaders(req.headers, parsedUrl.hostname, parsedUrl.pathname, req.method);
+    const headers = injectHeaders(req.headers, parsedUrl.hostname, parsedUrl.pathname);
     delete headers['proxy-connection'];
     
     const options = {
@@ -445,7 +438,7 @@ function injectHeaders(headers, hostname, urlPath = '', method = 'GET') {
       const targetUrl = `https://${hostname}${req.url}`;
       log('INFO', `→ HTTPS ${req.method} ${targetUrl}`, '', hostname);
       
-      const headers = injectHeaders(req.headers, hostname, req.url, req.method);
+      const headers = injectHeaders(req.headers, hostname, req.url);
       delete headers['proxy-connection'];
       
       const options = {
@@ -508,7 +501,7 @@ function injectHeaders(headers, hostname, urlPath = '', method = 'GET') {
       
       setInterval(() => {
         if (stats.totalRequests > 0 && CONFIG.ENABLE_LOGGING) {
-          log('INFO', `Stats: ${stats.totalRequests} total | ${stats.httpRequests} HTTP | ${stats.httpsRequests} HTTPS | ${stats.headersInjected} headers | ${stats.getRequestsBypassed} GET bypassed | ${stats.errors} errors`);
+          log('INFO', `Stats: ${stats.totalRequests} total | ${stats.httpRequests} HTTP | ${stats.httpsRequests} HTTPS | ${stats.headersInjected} headers | ${stats.errors} errors`);
         }
       }, 60000);
     });
@@ -563,7 +556,6 @@ function injectHeaders(headers, hostname, urlPath = '', method = 'GET') {
     console.log(`    HTTP Requests:     ${stats.httpRequests}`);
     console.log(`    HTTPS Requests:    ${stats.httpsRequests}`);
     console.log(`    Headers Injected:  ${stats.headersInjected}`);
-    console.log(`    GET Bypassed:      ${stats.getRequestsBypassed}`);
     console.log(`    Errors:            ${stats.errors}`);
     console.log('');
     
