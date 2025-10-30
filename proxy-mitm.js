@@ -317,122 +317,31 @@
     
     // Handle relative URLs (browser directly accessing proxy)
     if (!req.url.startsWith('http://') && !req.url.startsWith('https://')) {
-      log('INFO', `Info page request: ${req.url}`);
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(`
   <!DOCTYPE html>
   <html>
   <head>
     <meta charset="utf-8">
-    <title>SEB Proxy Server</title>
+    <title>SEB Server</title>
     <style>
-      body { 
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
-        max-width: 700px; 
-        margin: 80px auto; 
-        padding: 40px;
-        background: #f5f5f5;
-      }
-      .container {
-        background: white;
-        border-radius: 12px;
-        padding: 40px;
-        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-      }
-      h1 { 
-        color: #2c3e50;
-        margin-bottom: 10px;
-        font-size: 32px;
-      }
-      .subtitle {
-        color: #7f8c8d;
-        margin-bottom: 30px;
-        font-size: 14px;
-      }
-      .error { 
-        background: #fee;
-        border-left: 4px solid #e74c3c;
-        padding: 20px;
-        border-radius: 8px;
-        margin: 25px 0;
-      }
-      .error-title {
-        font-weight: 600;
-        color: #c0392b;
-        font-size: 16px;
-        margin-bottom: 8px;
-      }
-      .error-text {
-        color: #555;
-        line-height: 1.6;
-      }
-      .download { 
-        background: #e8f5e9;
-        border-left: 4px solid #4caf50;
-        padding: 20px;
-        border-radius: 8px;
-        margin: 25px 0;
-      }
-      .download-title {
-        font-weight: 600;
-        color: #2e7d32;
-        font-size: 16px;
-        margin-bottom: 12px;
-      }
-      .download-link {
-        display: inline-block;
-        background: #4caf50;
-        color: white;
-        padding: 12px 24px;
-        border-radius: 6px;
-        text-decoration: none;
-        font-weight: 500;
-        transition: background 0.3s;
-      }
-      .download-link:hover {
-        background: #45a049;
-      }
-      .stats {
-        background: #f8f9fa;
-        padding: 20px;
-        border-radius: 8px;
-        margin-top: 25px;
-        border: 1px solid #dee2e6;
-      }
-      .stats-title {
-        font-weight: 600;
-        color: #495057;
-        margin-bottom: 12px;
-        font-size: 14px;
-      }
-      .stats-content {
-        color: #6c757d;
-        font-size: 14px;
-        line-height: 1.8;
-      }
+      body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;max-width:500px;margin:100px auto;padding:40px;background:#f5f5f5}
+      .c{background:#fff;border-radius:12px;padding:40px;box-shadow:0 2px 10px rgba(0,0,0,.1)}
+      h1{color:#2c3e50;margin-bottom:10px;font-size:28px}
+      .s{color:#7f8c8d;margin-bottom:30px;font-size:13px}
+      .d{background:#e8f5e9;border-left:4px solid #4caf50;padding:20px;border-radius:8px;margin:25px 0}
+      .dt{font-weight:600;color:#2e7d32;font-size:15px;margin-bottom:12px}
+      .dl{display:inline-block;background:#4caf50;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:500;transition:background .3s}
+      .dl:hover{background:#45a049}
     </style>
   </head>
   <body>
-    <div class="container">
-      <h1>🔒 SEB MITM Proxy Server</h1>
-      <div class="subtitle">For Safe Exam Browser only</div>
-      
-      <div class="error">
-        <div class="error-title">❌ Invalid Request</div>
-        <div class="error-text">This is a forward proxy server, not a web server.</div>
-      </div>
-      
-      <div class="download">
-        <div class="download-title">📥 Download Certificate:</div>
-        <a href="/cert" class="download-link">Click here to download CA certificate</a>
-      </div>
-      
-      <div class="stats">
-        <div class="stats-title">📊 Stats:</div>
-        <div class="stats-content">
-          Total Requests: ${stats.totalRequests}<br>
-          HTTP: ${stats.httpRequests} | HTTPS: ${stats.httpsRequests}
-        </div>
+    <div class="c">
+      <h1>🔒 SEB Server</h1>
+      <div class="s">For Safe Exam Browser</div>
+      <div class="d">
+        <div class="dt">📥 Download Certificate</div>
+        <a href="/cert" class="dl">Download CA Certificate</a>
       </div>
     </div>
   </body>
@@ -615,40 +524,26 @@
   }
 
   function printBanner() {
-    console.clear();
-    console.log('\x1b[36m╔═══════════════════════════════════════════════════════════════╗\x1b[0m');
-    console.log('\x1b[36m║     SEB MITM Proxy - HTTPS Header Injection Enabled          ║\x1b[0m');
-    console.log('\x1b[36m╚═══════════════════════════════════════════════════════════════╝\x1b[0m');
-    console.log('');
-    console.log(`  \x1b[32m✓\x1b[0m Server running on: \x1b[33mhttp://localhost:${CONFIG.PORT}\x1b[0m`);
-    console.log(`  \x1b[32m✓\x1b[0m HTTP Proxy: \x1b[32mEnabled\x1b[0m (with header injection)`);
-    console.log(`  \x1b[32m✓\x1b[0m HTTPS Proxy: \x1b[32mEnabled\x1b[0m (MITM with header injection)`);
-    console.log('');
-    console.log('  \x1b[36mHeaders injected into ALL requests:\x1b[0m');
-    for (const [key, value] of Object.entries(CONFIG.HEADERS)) {
-      console.log(`    \x1b[33m→\x1b[0m ${key}`);
-      console.log(`      \x1b[90m${value}\x1b[0m`);
-    }
-    console.log('');
-    console.log('  \x1b[36mConfigure SEB:\x1b[0m');
-    console.log('    Network > Proxies > Use SEB proxy settings');
-    console.log(`    \x1b[33m✓ HTTP:\x1b[0m  Host=127.0.0.1, Port=${CONFIG.PORT}`);
-    console.log(`    \x1b[33m✓ HTTPS:\x1b[0m Host=127.0.0.1, Port=${CONFIG.PORT}`);
-    console.log('');
-    console.log('  \x1b[32m📥 Download certificate:\x1b[0m');
-    console.log(`    \x1b[33mhttp://YOUR-RAILWAY-URL/cert\x1b[0m`);
-    console.log('');
-    
-    if (CONFIG.PORT !== 8080) {
-      console.log(`  \x1b[33m⚠ NOTE: Using port ${CONFIG.PORT} instead of 8080\x1b[0m`);
-      console.log(`  \x1b[33m⚠ Update SEB config to use port ${CONFIG.PORT}\x1b[0m`);
+    if (isProd) {
+      // Production: Compact banner
+      console.log('\x1b[32m✓\x1b[0m SEB Proxy Server');
+      console.log(`\x1b[32m✓\x1b[0m Port: \x1b[33m${CONFIG.PORT}\x1b[0m | Cert: \x1b[33m/cert\x1b[0m`);
+      console.log(`\x1b[32m✓\x1b[0m Optimized: Keep-Alive, Static Skip, Async Logging`);
+    } else {
+      // Development: Full banner
+      console.clear();
+      console.log('\x1b[36m╔════════════════════════════════════════╗\x1b[0m');
+      console.log('\x1b[36m║    SEB Proxy - Header Injection       ║\x1b[0m');
+      console.log('\x1b[36m╚════════════════════════════════════════╝\x1b[0m');
+      console.log('');
+      console.log(`  \x1b[32m✓\x1b[0m Port: \x1b[33m${CONFIG.PORT}\x1b[0m`);
+      console.log(`  \x1b[32m✓\x1b[0m HTTP/HTTPS Proxy: \x1b[32mEnabled\x1b[0m`);
+      console.log(`  \x1b[32m✓\x1b[0m Certificate: \x1b[33m/cert\x1b[0m`);
+      console.log('');
+      console.log('  \x1b[36mTargets:\x1b[0m ' + CONFIG.ALLOWED_DOMAINS.join(', '));
+      console.log('  \x1b[90mPress Ctrl+C to stop\x1b[0m');
       console.log('');
     }
-    
-    console.log('  \x1b[90mPress Ctrl+C to stop\x1b[0m');
-    console.log('');
-    console.log('─'.repeat(65));
-    console.log('');
   }
 
   // Graceful shutdown
