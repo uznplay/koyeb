@@ -274,10 +274,10 @@ const stats = {
 function injectHeaders(headers, hostname, urlPath = '', method = 'GET') {
   const injected = { ...headers };
   
-  // ===== OPTIMIZATION: Skip GET requests - kệ nó luôn! =====
-  if (method === 'GET' || method === 'HEAD') {
+  // ===== OPTIMIZATION: Skip GET requests only - kệ nó luôn! =====
+  if (method === 'GET') {
     stats.getRequestsBypassed++;
-    return injected; // GET/HEAD không cần headers, cho đi thẳng
+    return injected; // GET không cần headers, cho đi thẳng
   }
   
   // Only inject headers for whitelisted domains and non-static files
